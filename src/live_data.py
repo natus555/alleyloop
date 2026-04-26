@@ -2,6 +2,7 @@ import json
 import re as _re
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -33,28 +34,26 @@ NBA_ID_TO_TRI = {
 }
 TRI_TO_NBA_ID = {v: k for k, v in NBA_ID_TO_TRI.items()}
 
-# ESPN uses different abbreviations in a few places
 _ESPN_TO_TRI = {
-    "GS": "GSW", "SA": "SAS", "NY": "NYK", "NO": "NOP",
-    "UTH": "UTA",
+    "GS": "GSW", "SA": "SAS", "NY": "NYK", "NO": "NOP", "UTH": "UTA",
 }
 
 _ESPN_TEAM_NAME_TO_TRI = {
-    "Atlanta Hawks": "ATL",       "Brooklyn Nets": "BKN",
-    "Boston Celtics": "BOS",      "Charlotte Hornets": "CHA",
-    "Chicago Bulls": "CHI",       "Cleveland Cavaliers": "CLE",
-    "Dallas Mavericks": "DAL",    "Denver Nuggets": "DEN",
-    "Detroit Pistons": "DET",     "Golden State Warriors": "GSW",
-    "Houston Rockets": "HOU",     "Indiana Pacers": "IND",
-    "LA Clippers": "LAC",         "Los Angeles Lakers": "LAL",
-    "Memphis Grizzlies": "MEM",   "Miami Heat": "MIA",
-    "Milwaukee Bucks": "MIL",     "Minnesota Timberwolves": "MIN",
-    "New Orleans Pelicans": "NOP","New York Knicks": "NYK",
+    "Atlanta Hawks": "ATL",        "Brooklyn Nets": "BKN",
+    "Boston Celtics": "BOS",       "Charlotte Hornets": "CHA",
+    "Chicago Bulls": "CHI",        "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL",     "Denver Nuggets": "DEN",
+    "Detroit Pistons": "DET",      "Golden State Warriors": "GSW",
+    "Houston Rockets": "HOU",      "Indiana Pacers": "IND",
+    "LA Clippers": "LAC",          "Los Angeles Lakers": "LAL",
+    "Memphis Grizzlies": "MEM",    "Miami Heat": "MIA",
+    "Milwaukee Bucks": "MIL",      "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NOP", "New York Knicks": "NYK",
     "Oklahoma City Thunder": "OKC","Orlando Magic": "ORL",
-    "Philadelphia 76ers": "PHI",  "Phoenix Suns": "PHX",
+    "Philadelphia 76ers": "PHI",   "Phoenix Suns": "PHX",
     "Portland Trail Blazers": "POR","Sacramento Kings": "SAC",
-    "San Antonio Spurs": "SAS",   "Toronto Raptors": "TOR",
-    "Utah Jazz": "UTA",           "Washington Wizards": "WAS",
+    "San Antonio Spurs": "SAS",    "Toronto Raptors": "TOR",
+    "Utah Jazz": "UTA",            "Washington Wizards": "WAS",
 }
 
 _STATUS_RANK = {
@@ -65,17 +64,8 @@ _STATUS_RANK = {
     "active": 0,
 }
 
-STATUS_COLORS = {
-    "Out": "#e74c3c", "Injured Reserve": "#e74c3c",
-    "Doubtful": "#e67e22", "Questionable": "#f1c40f",
-    "Game Time Decision": "#f1c40f", "Day-To-Day": "#3498db",
-    "Day To Day": "#3498db", "Probable": "#2ecc71", "Active": "#2ecc71",
-}
-
 _ESPN_POS_MAP = {"G": "G", "F": "F", "C": "C", "": "F"}
 
-
-# -- cache helpers --
 
 def _cache_path(name: str) -> Path:
     return LIVE_DIR / f"{name}_{date.today()}.json"
@@ -111,14 +101,12 @@ def _resolve_status_rank(status_name: str) -> int:
                  if key.startswith(k) or k.startswith(key)), 0)
 
 
-# -- ESPN team map --
-
 def espn_team_map() -> dict:
     cached = _load_cache("espn_teams")
     if cached:
         return cached
     try:
-        data = _get(f"{ESPN_BASE}/teams")
+        data  = _get(f"{ESPN_BASE}/teams")
         teams = data["sports"][0]["leagues"][0]["teams"]
         m = {t["team"]["id"]: _norm_tri(t["team"]["abbreviation"]) for t in teams}
         _save_cache("espn_teams", m)
@@ -127,8 +115,6 @@ def espn_team_map() -> dict:
         print(f"  [live] ESPN team map failed: {e}")
         return {}
 
-
-# -- schedule --
 
 def fetch_todays_schedule(force: bool = False) -> pd.DataFrame:
     cached = _load_cache("schedule")
@@ -150,10 +136,9 @@ def fetch_todays_schedule(force: bool = False) -> pd.DataFrame:
         if not home or not away:
             continue
 
-        home_tri   = _norm_tri(home["team"]["abbreviation"])
-        away_tri   = _norm_tri(away["team"]["abbreviation"])
-        status_obj = comp.get("status", {})
-        status     = status_obj.get("type", {}).get("description", "Scheduled")
+        home_tri = _norm_tri(home["team"]["abbreviation"])
+        away_tri = _norm_tri(away["team"]["abbreviation"])
+        status   = comp.get("status", {}).get("type", {}).get("description", "Scheduled")
 
         games.append({
             "game_id":     e["id"],
@@ -173,8 +158,6 @@ def fetch_todays_schedule(force: bool = False) -> pd.DataFrame:
     _save_cache("schedule", games)
     return pd.DataFrame(games)
 
-
-# -- injury report --
 
 def fetch_injury_report(force: bool = False) -> pd.DataFrame:
     cached = _load_cache("injuries")
@@ -197,10 +180,10 @@ def fetch_injury_report(force: bool = False) -> pd.DataFrame:
             continue
 
         for p in team_entry.get("injuries", []):
-            athlete    = p.get("athlete", {})
-            name       = athlete.get("displayName", "")
-            pos_obj    = athlete.get("position", {})
-            position   = pos_obj.get("abbreviation", "") if isinstance(pos_obj, dict) else ""
+            athlete     = p.get("athlete", {})
+            name        = athlete.get("displayName", "")
+            pos_obj     = athlete.get("position", {})
+            position    = pos_obj.get("abbreviation", "") if isinstance(pos_obj, dict) else ""
             status_name = p.get("status", "Out")
             rank        = _resolve_status_rank(status_name)
             details     = p.get("details", {}) or {}
@@ -228,14 +211,10 @@ def get_injured_players(team_tri: str, min_status_rank: int = 2) -> pd.DataFrame
     df = fetch_injury_report()
     if df.empty:
         return df
-    return df[(df["team_tri"] == team_tri) &
-              (df["status_rank"] >= min_status_rank)].copy()
+    return df[(df["team_tri"] == team_tri) & (df["status_rank"] >= min_status_rank)].copy()
 
 
-def injury_impact_score(team_tri: str,
-                        feats: pd.DataFrame,
-                        min_ewma_threshold: float = 20.0) -> float:
-    """Fraction of team EWMA minutes unavailable due to injury. Returns [0, 1]."""
+def injury_impact_score(team_tri: str, feats: pd.DataFrame, min_ewma_threshold: float = 20.0) -> float:
     injured = get_injured_players(team_tri)
     if injured.empty:
         return 0.0
@@ -257,8 +236,6 @@ def injury_impact_score(team_tri: str,
     inj_min   = latest[latest["playerName"].str.lower().isin(injured_names)]["min_ewma"].sum()
     return round(float(inj_min / max(total_min, 1)), 3)
 
-
-# -- roster positions --
 
 def _subclassify_position(primary: str, stats: dict) -> str:
     reb = float(stats.get("reb", 0) or 0)
@@ -294,11 +271,10 @@ def fetch_roster_positions(force: bool = False) -> pd.DataFrame:
             data = _get(f"{ESPN_BASE}/teams/{espn_id}/roster", timeout=15)
             for a in data.get("athletes", []):
                 raw_pos = a.get("position", {}).get("abbreviation", "") or ""
-                primary = _ESPN_POS_MAP.get(raw_pos.upper(), "F")
                 rows.append({
                     "player_name": a.get("fullName", ""),
                     "team_tri":    tri,
-                    "primary_pos": primary,
+                    "primary_pos": _ESPN_POS_MAP.get(raw_pos.upper(), "F"),
                 })
             time.sleep(0.2)
         except Exception as e:
@@ -309,19 +285,13 @@ def fetch_roster_positions(force: bool = False) -> pd.DataFrame:
 
 
 def fetch_recent_trades(force: bool = False, days_back: int = 120) -> pd.DataFrame:
-    """
-    Fetch recent NBA transactions and keep trade-related records.
-    Returns rows with at least player_name and to_team_tri when available.
-    """
     cached = _load_cache("recent_trades")
     if cached and not force:
         return pd.DataFrame(cached)
 
     try:
-        from datetime import datetime
         from nba_api.stats.endpoints import playertransactions
-
-        end_dt = date.today()
+        end_dt   = date.today()
         start_dt = end_dt - timedelta(days=max(7, int(days_back)))
         raw = playertransactions.PlayerTransactions(
             start_date_nullable=start_dt.strftime("%m/%d/%Y"),
@@ -335,7 +305,6 @@ def fetch_recent_trades(force: bool = False, days_back: int = 120) -> pd.DataFra
         _save_cache("recent_trades", [])
         return raw
 
-    # Normalize column names for resilient lookup across nba_api versions.
     colmap = {c.lower(): c for c in raw.columns}
 
     def _col(*names):
@@ -345,11 +314,11 @@ def fetch_recent_trades(force: bool = False, days_back: int = 120) -> pd.DataFra
                 return c
         return None
 
-    player_col = _col("player_name", "player")
-    type_col = _col("transaction_type", "transaction")
-    desc_col = _col("description", "notes")
+    player_col  = _col("player_name", "player")
+    type_col    = _col("transaction_type", "transaction")
+    desc_col    = _col("description", "notes")
     to_team_col = _col("to_team_abbreviation", "to_team", "team_abbreviation")
-    date_col = _col("transaction_date", "date")
+    date_col    = _col("transaction_date", "date")
 
     if not player_col:
         return pd.DataFrame()
@@ -357,22 +326,20 @@ def fetch_recent_trades(force: bool = False, days_back: int = 120) -> pd.DataFra
     rows = []
     for _, r in raw.iterrows():
         trans_type = str(r.get(type_col, "") if type_col else "").strip()
-        desc = str(r.get(desc_col, "") if desc_col else "").strip()
-        blob = f"{trans_type} {desc}".lower()
-        if "trade" not in blob:
+        desc       = str(r.get(desc_col, "") if desc_col else "").strip()
+        if "trade" not in f"{trans_type} {desc}".lower():
             continue
 
         to_team_raw = str(r.get(to_team_col, "") if to_team_col else "").strip().upper()
         to_team_tri = _norm_tri(to_team_raw) if to_team_raw else ""
         if not to_team_tri:
-            # If destination team is missing, skip to avoid bad remaps.
             continue
 
         rows.append({
-            "player_name": str(r.get(player_col, "")).strip(),
-            "to_team_tri": to_team_tri,
+            "player_name":      str(r.get(player_col, "")).strip(),
+            "to_team_tri":      to_team_tri,
             "transaction_type": trans_type or "Trade",
-            "description": desc,
+            "description":      desc,
             "transaction_date": str(r.get(date_col, "") if date_col else ""),
         })
 
@@ -381,9 +348,6 @@ def fetch_recent_trades(force: bool = False, days_back: int = 120) -> pd.DataFra
 
 
 def fetch_current_rosters(force: bool = False) -> pd.DataFrame:
-    """
-    Build current rosters from ESPN team rosters and apply recent trades.
-    """
     cached = _load_cache("current_rosters")
     if cached and not force:
         return pd.DataFrame(cached)
@@ -394,59 +358,71 @@ def fetch_current_rosters(force: bool = False) -> pd.DataFrame:
 
     roster = base.copy()
     roster["player_name"] = roster["player_name"].astype(str).str.strip()
-    roster["team_tri"] = roster["team_tri"].astype(str).str.upper().map(_norm_tri)
-    roster["source"] = "espn_roster"
+    roster["team_tri"]    = roster["team_tri"].astype(str).str.upper().map(_norm_tri)
+    roster["source"]      = "espn_roster"
 
     trades = fetch_recent_trades(force=force)
     if not trades.empty:
-        # Latest trade destination wins for each player.
         trades = trades.copy()
         trades["player_name"] = trades["player_name"].astype(str).str.strip()
         trades["to_team_tri"] = trades["to_team_tri"].astype(str).str.upper().map(_norm_tri)
         if "transaction_date" in trades.columns:
             trades = trades.sort_values("transaction_date")
-        latest = trades.dropna(subset=["player_name", "to_team_tri"]).drop_duplicates("player_name", keep="last")
+        latest   = trades.dropna(subset=["player_name", "to_team_tri"]).drop_duplicates("player_name", keep="last")
         move_map = dict(zip(latest["player_name"], latest["to_team_tri"]))
         roster["team_tri"] = roster["player_name"].map(lambda n: move_map.get(n, None)).fillna(roster["team_tri"])
-        traded_names = set(move_map.keys())
-        roster["source"] = roster["player_name"].map(lambda n: "trade_adjusted" if n in traded_names else "espn_roster")
+        traded   = set(move_map.keys())
+        roster["source"] = roster["player_name"].map(lambda n: "trade_adjusted" if n in traded else "espn_roster")
 
     records = roster.to_dict("records")
     _save_cache("current_rosters", records)
     return roster
 
 
-# -- upcoming schedule --
+def fetch_schedule_range(days_ahead: int = 7, force: bool = False) -> pd.DataFrame:
+    cached = _load_cache("schedule_range")
+    if cached and not force:
+        return pd.DataFrame(cached)
 
-def fetch_schedule_range(days_ahead: int = 7) -> pd.DataFrame:
-    frames = []
-    today  = date.today()
-    for d in range(days_ahead + 1):
-        dt     = today + timedelta(days=d)
-        dt_str = dt.strftime("%Y%m%d")
+    from datetime import datetime, timezone as _tz
+    today_utc = datetime.now(_tz.utc).date()
+    dates     = [today_utc + timedelta(days=d) for d in range(days_ahead + 1)]
+
+    def _fetch_day(dt):
         try:
-            data   = _get(f"{ESPN_BASE}/scoreboard?dates={dt_str}")
-            events = data.get("events", [])
-            for e in events:
+            data = _get(f"{ESPN_BASE}/scoreboard?dates={dt.strftime('%Y%m%d')}")
+            rows = []
+            for e in data.get("events", []):
                 comp        = e["competitions"][0]
                 competitors = comp["competitors"]
                 home = next((c for c in competitors if c["homeAway"] == "home"), None)
                 away = next((c for c in competitors if c["homeAway"] == "away"), None)
                 if not home or not away:
                     continue
-                frames.append({
-                    "game_date": dt.isoformat(),
-                    "game_id":   e["id"],
-                    "home_tri":  _norm_tri(home["team"]["abbreviation"]),
-                    "away_tri":  _norm_tri(away["team"]["abbreviation"]),
+                rows.append({
+                    "game_id":    e["id"],
+                    "start_time": e.get("date", ""),
+                    "home_tri":   _norm_tri(home["team"]["abbreviation"]),
+                    "away_tri":   _norm_tri(away["team"]["abbreviation"]),
                 })
-            time.sleep(0.2)
+            return rows
         except Exception:
-            pass
+            return []
+
+    seen   = set()
+    frames = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_fetch_day, dt): dt for dt in dates}
+        for fut in as_completed(futures):
+            for r in fut.result():
+                if r["game_id"] not in seen:
+                    seen.add(r["game_id"])
+                    frames.append(r)
+
+    frames.sort(key=lambda r: r["start_time"])
+    _save_cache("schedule_range", frames)
     return pd.DataFrame(frames) if frames else pd.DataFrame()
 
-
-# -- advanced stats (nba_api) --
 
 def fetch_advanced_stats(season: str = "2025-26", force: bool = False) -> pd.DataFrame:
     cached = _load_cache("advanced_stats")
@@ -469,7 +445,6 @@ def fetch_advanced_stats(season: str = "2025-26", force: bool = False) -> pd.Dat
                 df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
         records = df.to_dict("records")
         _save_cache("advanced_stats", records)
-        print(f"  [live] Advanced stats: {len(df)} players")
         return df
     except Exception as e:
         print(f"  [live] Advanced stats fetch failed: {e}")
@@ -495,8 +470,6 @@ def advanced_stats_lookup(season: str = "2025-26") -> dict:
     return result
 
 
-# -- live scores + box scores (nba_api live) --
-
 def _parse_game_clock(clock_str: str) -> float:
     if not clock_str:
         return 0.0
@@ -511,11 +484,11 @@ def fetch_live_scores() -> pd.DataFrame:
         games = data["scoreboard"]["games"]
         rows  = []
         for g in games:
-            home      = g["homeTeam"]
-            away      = g["awayTeam"]
-            period    = int(g.get("period", 0) or 0)
+            home     = g["homeTeam"]
+            away     = g["awayTeam"]
+            period   = int(g.get("period", 0) or 0)
             clock_sec = _parse_game_clock(g.get("gameClock", ""))
-            status    = int(g.get("gameStatus", 1) or 1)
+            status   = int(g.get("gameStatus", 1) or 1)
 
             period_dur       = 300 if period > 4 else 720
             period_elapsed   = period_dur - clock_sec if period > 0 else 0
@@ -583,8 +556,6 @@ def fetch_live_boxscore(game_id: str) -> tuple:
         print(f"  [live] box score fetch failed for {game_id}: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-
-# -- refresh all --
 
 def refresh_all(verbose: bool = True) -> dict:
     if verbose:

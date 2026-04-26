@@ -8,38 +8,69 @@ import GameDetail from './pages/GameDetail'
 import Rosters from './pages/Rosters'
 
 const NAV = [
-  { to: '/',          icon: Activity,       label: 'Live'      },
-  { to: '/upcoming',  icon: Calendar,       label: 'Schedule'  },
-  { to: '/injuries',  icon: AlertTriangle,  label: 'Injuries'  },
-  { to: '/rosters',   icon: ListOrdered,    label: 'Rosters'   },
-  { to: '/optimizer', icon: Users,          label: 'Optimizer' },
+  { to: '/',          icon: Activity,      label: 'Live'      },
+  { to: '/upcoming',  icon: Calendar,      label: 'Schedule'  },
+  { to: '/injuries',  icon: AlertTriangle, label: 'Injuries'  },
+  { to: '/rosters',   icon: ListOrdered,   label: 'Rosters'   },
+  { to: '/optimizer', icon: Users,         label: 'Optimizer' },
 ]
 
 function NavBar() {
   const loc = useLocation()
   return (
-    <nav className="fixed inset-x-0 top-0 z-50 border-b-2 border-indigo-500/70 bg-slate-950/90 shadow-lg shadow-slate-900/30 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-7xl items-center gap-1 px-5">
-        {/* Logo */}
-        <div className="mr-6 flex shrink-0 items-center gap-2">
-          <div className="flex size-7 items-center justify-center rounded-md bg-linear-to-br from-indigo-500 to-violet-600">
+    <nav style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50,
+      background: '#0f172a',
+      borderBottom: '3px solid #4f46e5',
+      boxShadow: '0 2px 12px rgba(0,0,0,0.25)',
+    }}>
+      <div style={{
+        maxWidth: 1200, margin: '0 auto',
+        display: 'flex', alignItems: 'center',
+        height: 56, padding: '0 20px', gap: 4,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginRight: 24, flexShrink: 0 }}>
+          <div style={{
+            width: 28, height: 28, borderRadius: 7,
+            background: 'linear-gradient(135deg, #4f46e5, #7c3aed)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
             <TrendingUp size={15} color="#fff" />
           </div>
-          <span className="text-[17px] font-extrabold tracking-tight text-white">AlleyLoop</span>
+          <span style={{ fontSize: 17, fontWeight: 800, color: '#ffffff', letterSpacing: '-0.4px' }}>
+            AlleyLoop
+          </span>
         </div>
 
-        {/* Nav links */}
         {NAV.map(({ to, icon: Icon, label }) => {
           const active = to === '/' ? loc.pathname === '/' : loc.pathname.startsWith(to)
           return (
             <NavLink
               key={to}
               to={to}
-              className={`flex items-center gap-1.5 rounded-md border-b-2 px-3.5 py-1.5 text-[13px] font-semibold transition ${
-                active
-                  ? 'border-indigo-300 bg-white/10 text-white'
-                  : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'
-              }`}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '6px 14px',
+                borderRadius: 8,
+                fontSize: 13, fontWeight: 600,
+                textDecoration: 'none',
+                color: active ? '#ffffff' : '#94a3b8',
+                background: active ? 'rgba(255,255,255,0.1)' : 'transparent',
+                borderBottom: active ? '2px solid #818cf8' : '2px solid transparent',
+                transition: 'all 0.15s ease',
+              }}
+              onMouseEnter={e => {
+                if (!active) {
+                  (e.currentTarget as HTMLAnchorElement).style.color = '#e2e8f0'
+                  ;(e.currentTarget as HTMLAnchorElement).style.background = 'rgba(255,255,255,0.06)'
+                }
+              }}
+              onMouseLeave={e => {
+                if (!active) {
+                  (e.currentTarget as HTMLAnchorElement).style.color = '#94a3b8'
+                  ;(e.currentTarget as HTMLAnchorElement).style.background = 'transparent'
+                }
+              }}
             >
               <Icon size={14} />
               {label}
@@ -47,11 +78,16 @@ function NavBar() {
           )
         })}
 
-        {/* Right side — coming soon */}
-        <div className="ml-auto flex items-center gap-1.5 opacity-60">
+        <div style={{
+          marginLeft: 'auto', display: 'flex', alignItems: 'center',
+          gap: 6, opacity: 0.5,
+        }}>
           <Shuffle size={13} color="#94a3b8" />
-          <span className="text-xs text-slate-400">Trade Advisor</span>
-          <span className="rounded-full bg-white/10 px-1.5 py-0.5 text-[10px] tracking-wide text-slate-500">SOON</span>
+          <span style={{ fontSize: 12, color: '#94a3b8' }}>Trade Advisor</span>
+          <span style={{
+            fontSize: 10, color: '#64748b', fontWeight: 700, letterSpacing: '0.05em',
+            background: 'rgba(255,255,255,0.08)', padding: '2px 7px', borderRadius: 99,
+          }}>SOON</span>
         </div>
       </div>
     </nav>
@@ -62,7 +98,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <NavBar />
-      <main className="mx-auto max-w-7xl px-5 pb-12 pt-[72px]">
+      <main style={{ maxWidth: 1200, margin: '0 auto', padding: '76px 20px 48px' }}>
         <Routes>
           <Route path="/"             element={<Live />} />
           <Route path="/upcoming"     element={<Upcoming />} />

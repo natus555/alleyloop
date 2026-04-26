@@ -4,17 +4,17 @@ import TeamBadge from '../components/TeamBadge'
 
 interface UpcomingGame {
   game_id: string
+  start_time: string
   home_tri: string; away_tri: string
   home_name: string; away_name: string
   home_color: string; away_color: string
   home_logo?: string; away_logo?: string
-  win_prob_home?: number
-  win_prob_away?: number
-  home_score?: number
-  away_score?: number
 }
 
-interface DayGroup { date: string; games: UpcomingGame[] }
+interface Pred {
+  win_prob_home: number; win_prob_away: number
+  home_score: number; away_score: number
+}
 
 function TeamBlock({ tri, name, color, logo, side }: { tri: string; name: string; color: string; logo?: string; side: 'home' | 'away' }) {
   const right = side === 'away'
@@ -32,17 +32,21 @@ function TeamBlock({ tri, name, color, logo, side }: { tri: string; name: string
 function GameRow({ g }: { g: UpcomingGame }) {
   const nav = useNavigate()
   const id = `${g.home_tri}-vs-${g.away_tri}`
-  const hasPred = typeof g.win_prob_home === 'number' && typeof g.win_prob_away === 'number' && typeof g.home_score === 'number' && typeof g.away_score === 'number'
+  const { data: pred } = useApi<Pred>(`/predict/game?home=${g.home_tri}&away=${g.away_tri}`)
 
-  const homeWin = hasPred ? g.win_prob_home! >= g.win_prob_away! : null
+  const localTime = g.start_time
+    ? new Date(g.start_time).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    : ''
+
+  const homeWin = pred ? pred.win_prob_home >= pred.win_prob_away : null
   const favColor = homeWin === null ? '#4f46e5' : homeWin ? g.home_color : g.away_color
-  const favPct = hasPred ? Math.round((homeWin ? g.win_prob_home! : g.win_prob_away!) * 100) : null
+  const favPct   = pred ? Math.round((homeWin ? pred.win_prob_home : pred.win_prob_away) * 100) : null
 
   return (
     <div onClick={() => nav(`/game/${id}`)} style={{
       background: '#ffffff',
       border: '1px solid #e2e8f0',
-      borderRadius: 12, padding: '16px 20px',
+      borderRadius: 12, padding: '14px 20px',
       cursor: 'pointer', transition: 'all 0.18s ease',
       display: 'grid', gridTemplateColumns: '1fr auto 1fr',
       alignItems: 'center', gap: 16,
@@ -62,18 +66,25 @@ function GameRow({ g }: { g: UpcomingGame }) {
       <TeamBlock tri={g.home_tri} name={g.home_name} color={g.home_color} logo={g.home_logo} side="home" />
 
       <div style={{ textAlign: 'center', minWidth: 160 }}>
-        {hasPred ? (
+        {localTime && (
+          <div style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600, marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            {localTime}
+          </div>
+        )}
+        {pred ? (
           <>
-            <div style={{ fontSize: 28, fontWeight: 900, letterSpacing: '-1.5px', color: '#0f172a', lineHeight: 1 }}>
-              <span style={{ color: g.home_color }}>{Math.round(g.home_score!)}</span>
+            <div style={{ fontSize: 26, fontWeight: 900, letterSpacing: '-1.5px', color: '#0f172a', lineHeight: 1 }}>
+              <span style={{ color: g.home_color }}>{Math.round(pred.home_score)}</span>
               <span style={{ color: '#cbd5e1', margin: '0 8px' }}>–</span>
-              <span style={{ color: g.away_color }}>{Math.round(g.away_score!)}</span>
+              <span style={{ color: g.away_color }}>{Math.round(pred.away_score)}</span>
             </div>
             <div style={{ fontSize: 10, color: '#94a3b8', margin: '4px 0 6px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 }}>projected</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center' }}>
-              <div style={{ width: 76, height: 4, borderRadius: 3, overflow: 'hidden', background: '#e2e8f0', display: 'flex' }}>
-                <div style={{ height: '100%', width: `${Math.round(g.win_prob_home! * 100)}%`, background: g.home_color }} />
-                <div style={{ height: '100%', width: `${Math.round(g.win_prob_away! * 100)}%`, background: g.away_color }} />
+              <div style={{ width: 72, height: 3, borderRadius: 2, overflow: 'hidden', background: '#e2e8f0' }}>
+                <div style={{
+                  height: '100%', width: `${Math.round(pred.win_prob_home * 100)}%`,
+                  background: `linear-gradient(90deg, ${g.home_color}, ${g.away_color})`,
+                }} />
               </div>
             </div>
             <div style={{ fontSize: 12, fontWeight: 700, color: favColor, marginTop: 4 }}>
@@ -90,16 +101,35 @@ function GameRow({ g }: { g: UpcomingGame }) {
   )
 }
 
-export default function Upcoming() {
-  const { data, loading } = useApi<{ days: DayGroup[] }>('/schedule/upcoming')
+function localDateKey(isoUtc: string): string {
+  const d = new Date(isoUtc)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
 
-  const fmt = (d: string) => {
-    const dt = new Date(d + 'T12:00:00')
-    const today = new Date()
-    const diff = Math.round((dt.getTime() - today.getTime()) / 86400000)
-    const label = diff === 0 ? 'Today' : diff === 1 ? 'Tomorrow' : dt.toLocaleDateString('en-US', { weekday: 'long' })
-    return { label, sub: dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) }
+function fmtDateKey(key: string): { label: string; sub: string } {
+  const [y, m, day] = key.split('-').map(Number)
+  const dt = new Date(y, m - 1, day)
+  const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0)
+  const diff = Math.round((dt.getTime() - todayMid.getTime()) / 86400000)
+  const dateStr = dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  if (diff === 0) return { label: 'Today', sub: dateStr }
+  if (diff === 1) return { label: 'Tomorrow', sub: dateStr }
+  return { label: dt.toLocaleDateString(undefined, { weekday: 'long' }), sub: dateStr }
+}
+
+export default function Upcoming() {
+  const { data, loading } = useApi<{ games: UpcomingGame[] }>('/schedule/upcoming')
+
+  // Group by device-local date, filter out past games
+  const now = Date.now()
+  const grouped = new Map<string, UpcomingGame[]>()
+  for (const g of data?.games ?? []) {
+    if (!g.start_time || new Date(g.start_time).getTime() < now) continue
+    const key = localDateKey(g.start_time)
+    if (!grouped.has(key)) grouped.set(key, [])
+    grouped.get(key)!.push(g)
   }
+  const days = [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b))
 
   return (
     <div className="fade-in" style={{ maxWidth: 900, margin: '0 auto' }}>
@@ -125,17 +155,17 @@ export default function Upcoming() {
         </div>
       )}
 
-      {!loading && !data?.days.length && (
+      {!loading && days.length === 0 && (
         <div style={{ textAlign: 'center', padding: '60px 0', color: '#94a3b8', fontSize: 14 }}>
           No upcoming games in the next 7 days
         </div>
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 32 }}>
-        {data?.days.map(day => {
-          const { label, sub } = fmt(day.date)
+        {days.map(([key, games]) => {
+          const { label, sub } = fmtDateKey(key)
           return (
-            <section key={day.date}>
+            <section key={key}>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 10 }}>
                 <span style={{ fontSize: 15, fontWeight: 800, color: '#0f172a' }}>{label}</span>
                 <span style={{ fontSize: 12, color: '#94a3b8', fontWeight: 500 }}>{sub}</span>
@@ -143,10 +173,10 @@ export default function Upcoming() {
                 <span style={{
                   fontSize: 10, fontWeight: 700, color: '#4f46e5',
                   background: '#ede9fe', padding: '2px 8px', borderRadius: 99,
-                }}>{day.games.length}G</span>
+                }}>{games.length}G</span>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {day.games.map(g => <GameRow key={`${g.home_tri}-${g.away_tri}`} g={g} />)}
+                {games.map(g => <GameRow key={g.game_id} g={g} />)}
               </div>
             </section>
           )

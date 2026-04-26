@@ -11,3 +11,5 @@ build/
 *.parquet
 *.feather
 .DS_Store
+data/live/
+*.log

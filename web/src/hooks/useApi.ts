@@ -24,7 +24,6 @@ export function useApi<T>(
     } finally {
       setLoading(false)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, ...deps])
 
   useEffect(() => { fetch_() }, [fetch_])

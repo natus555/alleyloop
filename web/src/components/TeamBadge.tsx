@@ -15,7 +15,6 @@ export default function TeamBadge({ tri, color = '#4f46e5', size = 36, logo }: P
           alt={tri}
           style={{ width: '100%', height: '100%', objectFit: 'contain' }}
           onError={e => {
-            // Fallback to text if logo fails to load
             const parent = (e.target as HTMLImageElement).parentElement
             if (parent) {
               parent.innerHTML = `<span style="font-weight:900;font-size:${size * 0.3}px;color:${color};letter-spacing:-0.5px">${tri}</span>`

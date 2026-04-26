@@ -1,0 +1,344 @@
+"""
+Live data layer — ESPN APIs
+Provides: today's schedule, current injury report, team ID mappings.
+All data is cached to data/live/ with a daily TTL.
+"""
+
+import json
+import time
+import warnings
+from datetime import date, datetime
+from pathlib import Path
+
+import pandas as pd
+import requests
+
+warnings.filterwarnings("ignore")
+
+LIVE_DIR = Path("data/live")
+LIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba"
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+}
+
+# ── Static team maps ──────────────────────────────────────────────────────────
+# NBA team ID → abbreviation (from CDN data)
+NBA_ID_TO_TRI = {
+    1610612737: "ATL", 1610612738: "BOS", 1610612751: "BKN",
+    1610612766: "CHA", 1610612741: "CHI", 1610612739: "CLE",
+    1610612742: "DAL", 1610612743: "DEN", 1610612745: "DET",
+    1610612744: "GSW", 1610612745: "HOU", 1610612754: "IND",
+    1610612746: "LAC", 1610612747: "LAL", 1610612763: "MEM",
+    1610612748: "MIA", 1610612749: "MIL", 1610612750: "MIN",
+    1610612740: "NOP", 1610612752: "NYK", 1610612760: "OKC",
+    1610612753: "ORL", 1610612755: "PHI", 1610612756: "PHX",
+    1610612757: "POR", 1610612758: "SAC", 1610612759: "SAS",
+    1610612761: "TOR", 1610612762: "UTA", 1610612764: "WAS",
+}
+TRI_TO_NBA_ID = {v: k for k, v in NBA_ID_TO_TRI.items()}
+
+# Fix duplicate DET/HOU
+TRI_TO_NBA_ID["DET"] = 1610612765
+TRI_TO_NBA_ID["HOU"] = 1610612745
+NBA_ID_TO_TRI[1610612765] = "DET"
+
+# ESPN abbreviation quirks
+_ESPN_TO_TRI = {
+    "GS": "GSW", "SA": "SAS", "NY": "NYK", "NO": "NOP",
+    "OKC": "OKC", "UTH": "UTA", "WAS": "WAS",
+}
+
+
+def _norm_tri(tri: str) -> str:
+    return _ESPN_TO_TRI.get(tri, tri)
+
+
+def _cache_path(name: str) -> Path:
+    return LIVE_DIR / f"{name}_{date.today()}.json"
+
+
+def _load_cache(name: str):
+    p = _cache_path(name)
+    if p.exists():
+        return json.loads(p.read_text())
+    return None
+
+
+def _save_cache(name: str, data):
+    _cache_path(name).write_text(json.dumps(data))
+
+
+def _get(url: str, timeout: int = 20) -> dict:
+    r = requests.get(url, headers=_HEADERS, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+# ── ESPN team map ─────────────────────────────────────────────────────────────
+
+def espn_team_map() -> dict:
+    """Returns {espn_team_id (str): abbreviation}."""
+    cached = _load_cache("espn_teams")
+    if cached:
+        return cached
+    try:
+        data = _get(f"{ESPN_BASE}/teams")
+        teams = data["sports"][0]["leagues"][0]["teams"]
+        m = {t["team"]["id"]: _norm_tri(t["team"]["abbreviation"])
+             for t in teams}
+        _save_cache("espn_teams", m)
+        return m
+    except Exception as e:
+        print(f"  [live] ESPN team map failed: {e}")
+        return {}
+
+
+# ── Today's schedule ──────────────────────────────────────────────────────────
+
+def fetch_todays_schedule(force: bool = False) -> pd.DataFrame:
+    """
+    Fetch today's NBA games from ESPN scoreboard.
+    Returns DataFrame with columns:
+        game_id, start_time, home_tri, away_tri, status,
+        home_score, away_score, home_nba_id, away_nba_id
+    """
+    cached = _load_cache("schedule")
+    if cached and not force:
+        return pd.DataFrame(cached)
+
+    try:
+        data = _get(f"{ESPN_BASE}/scoreboard")
+    except Exception as e:
+        print(f"  [live] schedule fetch failed: {e}")
+        return pd.DataFrame()
+
+    events = data.get("events", [])
+    games = []
+    for e in events:
+        comp = e["competitions"][0]
+        competitors = comp["competitors"]
+        home = next((c for c in competitors if c["homeAway"] == "home"), None)
+        away = next((c for c in competitors if c["homeAway"] == "away"), None)
+        if not home or not away:
+            continue
+
+        home_tri = _norm_tri(home["team"]["abbreviation"])
+        away_tri = _norm_tri(away["team"]["abbreviation"])
+
+        # Parse status
+        status_obj = comp.get("status", {})
+        status_type = status_obj.get("type", {})
+        status = status_type.get("description", "Scheduled")
+
+        # Quarter scores
+        home_linescore = [s["value"] for s in home.get("linescores", [])]
+        away_linescore = [s["value"] for s in away.get("linescores", [])]
+
+        games.append({
+            "game_id":      e["id"],
+            "start_time":   comp.get("date", ""),
+            "home_tri":     home_tri,
+            "away_tri":     away_tri,
+            "home_nba_id":  TRI_TO_NBA_ID.get(home_tri, 0),
+            "away_nba_id":  TRI_TO_NBA_ID.get(away_tri, 0),
+            "status":       status,
+            "home_score":   float(home.get("score", 0) or 0),
+            "away_score":   float(away.get("score", 0) or 0),
+            "home_q":       home_linescore,
+            "away_q":       away_linescore,
+            "venue":        comp.get("venue", {}).get("fullName", ""),
+        })
+
+    _save_cache("schedule", games)
+    return pd.DataFrame(games)
+
+
+# ── Injury report ─────────────────────────────────────────────────────────────
+
+_STATUS_RANK = {
+    "out": 4, "injured reserve": 4, "suspension": 4, "out_": 4,
+    "doubtful": 3,
+    "questionable": 2, "game time decision": 2, "game_time_decision": 2,
+    "day to day": 1, "day_to_day": 1, "probable": 1,
+    "active": 0,
+}
+
+STATUS_COLORS = {
+    "Out": "#e74c3c", "Injured Reserve": "#e74c3c",
+    "Doubtful": "#e67e22", "Questionable": "#f1c40f",
+    "Game Time Decision": "#f1c40f", "Day To Day": "#3498db",
+    "Probable": "#2ecc71", "Active": "#2ecc71",
+}
+
+
+def fetch_injury_report(force: bool = False) -> pd.DataFrame:
+    """
+    Scrape ESPN roster pages for all 30 teams, return non-Active players.
+    Caches result for the day.
+
+    Returns DataFrame:
+        team_tri, player_name, status, status_rank,
+        injury_detail, nba_team_id
+    """
+    cached = _load_cache("injuries")
+    if cached and not force:
+        df = pd.DataFrame(cached)
+        # Return ALL statuses so caller can filter
+        return df
+
+    emap = espn_team_map()
+    if not emap:
+        return pd.DataFrame()
+
+    rows = []
+    for espn_id, tri in emap.items():
+        try:
+            data = _get(f"{ESPN_BASE}/teams/{espn_id}/roster", timeout=15)
+            athletes = data.get("athletes", [])
+            for a in athletes:
+                injuries = a.get("injuries", [])
+
+                # Injuries array holds the real status — top-level status is always "Active"
+                if injuries:
+                    # Sort by date desc to get the most recent entry
+                    inj = sorted(injuries, key=lambda x: x.get("date", ""), reverse=True)[0]
+                    status_name = inj.get("status", "Out")
+                    status_type = status_name.lower().replace(" ", "_")
+                    detail = inj.get("longDescription", inj.get("description", ""))
+                else:
+                    status_obj = a.get("status", {})
+                    if isinstance(status_obj, dict):
+                        status_name = status_obj.get("name", "Active")
+                        status_type = status_obj.get("type", "active").lower()
+                    else:
+                        status_name = "Active"
+                        status_type = "active"
+                    detail = ""
+
+                rows.append({
+                    "team_tri":    tri,
+                    "nba_team_id": TRI_TO_NBA_ID.get(tri, 0),
+                    "player_name": a.get("fullName", ""),
+                    "status":      status_name,
+                    "status_type": status_type,
+                    "status_rank": _STATUS_RANK.get(status_type, 0),
+                    "injury_detail": detail,
+                    "position":    a.get("position", {}).get("abbreviation", ""),
+                })
+            time.sleep(0.25)
+        except Exception as e:
+            print(f"  [live] injury fetch failed for {tri} ({espn_id}): {e}")
+
+    _save_cache("injuries", rows)
+    df = pd.DataFrame(rows)
+    return df
+
+
+def get_injured_players(team_tri: str,
+                        min_status_rank: int = 2) -> pd.DataFrame:
+    """Return players with status_rank >= min_status_rank (Doubtful/Out)."""
+    df = fetch_injury_report()
+    if df.empty:
+        return df
+    return df[(df["team_tri"] == team_tri) &
+              (df["status_rank"] >= min_status_rank)].copy()
+
+
+def injury_impact_score(team_tri: str,
+                        feats: pd.DataFrame,
+                        min_ewma_threshold: float = 20.0) -> float:
+    """
+    Estimate the fraction of team EWMA production that is unavailable
+    due to injuries. Returns a value in [0, 1] where 0 = fully healthy,
+    1 = entire roster unavailable.
+    """
+    injured = get_injured_players(team_tri)
+    if injured.empty:
+        return 0.0
+
+    injured_names = set(injured["player_name"].str.lower())
+    nba_id = TRI_TO_NBA_ID.get(team_tri, 0)
+    team_feats = feats[feats["teamId"].astype("int64") == nba_id]
+    if team_feats.empty:
+        return 0.0
+
+    latest = (team_feats[team_feats["min_ewma"].fillna(0) > min_ewma_threshold]
+              .sort_values("game_date")
+              .groupby("personId").last()
+              .reset_index())
+
+    if latest.empty:
+        return 0.0
+
+    total_min = latest["min_ewma"].sum()
+    inj_min = latest[
+        latest["playerName"].str.lower().isin(injured_names)
+    ]["min_ewma"].sum()
+
+    return round(float(inj_min / max(total_min, 1)), 3)
+
+
+# ── Upcoming schedule (ESPN calendar) ─────────────────────────────────────────
+
+def fetch_schedule_range(days_ahead: int = 7) -> pd.DataFrame:
+    """Fetch schedule for the next N days."""
+    from datetime import timedelta
+    frames = []
+    today = date.today()
+    for d in range(days_ahead + 1):
+        dt = today + timedelta(days=d)
+        dt_str = dt.strftime("%Y%m%d")
+        try:
+            data = _get(f"{ESPN_BASE}/scoreboard?dates={dt_str}")
+            events = data.get("events", [])
+            for e in events:
+                comp = e["competitions"][0]
+                competitors = comp["competitors"]
+                home = next((c for c in competitors if c["homeAway"] == "home"), None)
+                away = next((c for c in competitors if c["homeAway"] == "away"), None)
+                if not home or not away:
+                    continue
+                frames.append({
+                    "game_date": dt.isoformat(),
+                    "game_id":   e["id"],
+                    "home_tri":  _norm_tri(home["team"]["abbreviation"]),
+                    "away_tri":  _norm_tri(away["team"]["abbreviation"]),
+                })
+            time.sleep(0.2)
+        except Exception:
+            pass
+    return pd.DataFrame(frames) if frames else pd.DataFrame()
+
+
+# ── Quick refresh ──────────────────────────────────────────────────────────────
+
+def refresh_all(verbose: bool = True) -> dict:
+    """Fetch and cache schedule + injuries. Returns summary dict."""
+    if verbose:
+        print("Fetching today's schedule...")
+    sched = fetch_todays_schedule(force=True)
+    if verbose:
+        print(f"  {len(sched)} games today")
+        print("Fetching injury report (30 teams)...")
+    inj = fetch_injury_report(force=True)
+    out_count = int((inj["status_rank"] >= 4).sum()) if not inj.empty else 0
+    q_count   = int((inj["status_rank"].isin([2, 3])).sum()) if not inj.empty else 0
+    if verbose:
+        print(f"  {out_count} OUT  |  {q_count} Questionable/Doubtful")
+    return {"schedule": sched, "injuries": inj,
+            "out_count": out_count, "q_count": q_count}
+
+
+if __name__ == "__main__":
+    result = refresh_all()
+    print("\nToday's games:")
+    print(result["schedule"][["home_tri", "away_tri", "status"]].to_string(index=False))
+    print("\nInjured players (Out/Doubtful):")
+    inj = result["injuries"]
+    if not inj.empty:
+        print(inj[inj["status_rank"] >= 3][
+            ["team_tri", "player_name", "status", "injury_detail"]
+        ].to_string(index=False))

@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(venv/Scripts/python.exe -c ' *)",
+      "PowerShell(Get-Command python)",
+      "PowerShell(python --version)",
+      "PowerShell(cd \"c:\\\\Capstone Project\"; npm create vite@latest web -- --template react-ts 2>&1 | tail -5)",
+      "PowerShell(cd \"c:\\\\Capstone Project\"; npm create vite@latest web -- --template react-ts; Write-Host \"Scaffold done\")",
+      "Bash(curl -s \"http://localhost:8000/teams\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(f'{len\\(d\\)} teams, first:', d[0]\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('Game pred:', d.get\\('home_name'\\), d.get\\('win_prob_home'\\), 'vs', d.get\\('away_name'\\), d.get\\('win_prob_away'\\), '| score:', d.get\\('home_score'\\), '-', d.get\\('away_score'\\)\\)\")",
+      "Bash(curl -s \"http://localhost:8000/injuries\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); inj=d.get\\('injuries',[]\\); print\\(f'Injuries: {len\\(inj\\)}, first:', inj[0] if inj else 'none'\\)\")",
+      "Bash(curl -s \"http://localhost:8000/predict/players?team=DEN&top_n=6\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(f\\\\\"{p['name']}: {p['predictions']['pts']} pts {p['predictions']['min']} min\\\\\"\\) for p in d['players']]\")",
+      "Bash(curl -s \"http://localhost:8000/predict/players?team=DEN&top_n=5\")",
+      "Bash(curl -s \"http://localhost:8000/predict/game?home=OKC&away=DEN\")",
+      "Bash(curl -s \"http://localhost:8000/predict/players?team=DEN&top_n=8&is_home=true&opp=BOS\")",
+      "Bash(curl -s \"http://localhost:8000/predict/players?team=DEN&top_n=8&is_home=false&opp=BOS\")",
+      "Bash(curl -s \"http://localhost:8000/predict/players?team=DEN&top_n=8&is_home=true\")",
+      "Bash(curl -s \"http://localhost:8000/predict/players?team=DEN&top_n=8&is_home=false\")",
+      "Bash(curl -s \"http://localhost:8000/predict/players?team=MIN&top_n=8\")",
+      "Bash(python -c ' *)",
+      "Bash(curl -s \"http://localhost:8000/predict/players?team=DEN&top_n=8\")",
+      "Bash(npx tsc *)",
+      "Bash(tasklist)",
+      "Bash(npx vite *)"
+    ]
+  }
+}

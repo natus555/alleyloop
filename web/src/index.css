@@ -3,7 +3,10 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  background: #f0f4f8;
+  background:
+    radial-gradient(1000px 500px at 10% -20%, rgba(99, 102, 241, 0.15), transparent 55%),
+    radial-gradient(1000px 500px at 100% 0%, rgba(168, 85, 247, 0.12), transparent 45%),
+    #f1f5f9;
   color: #0f172a;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   min-height: 100vh;

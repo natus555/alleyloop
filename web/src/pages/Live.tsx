@@ -197,6 +197,7 @@ export default function Live() {
     const id = `${g.homeTeam}-vs-${g.awayTeam}`
     if (seenIds.has(id)) return
     seenIds.add(id)
+    const status: UnifiedGame['status'] = g.status === 'scheduled' ? 'upcoming' : g.status
     unified.push({
       id,
       home_tri: g.homeTeam, away_tri: g.awayTeam,
@@ -205,7 +206,7 @@ export default function Live() {
       home_logo: g.home_logo, away_logo: g.away_logo,
       home_score: g.status !== 'scheduled' ? g.homeScore : null,
       away_score: g.status !== 'scheduled' ? g.awayScore : null,
-      status: g.status,
+      status,
       period: g.period, clock: g.gameClock,
       sortKey: g.status === 'live' ? 0 : g.status === 'final' ? 2 : 1,
     })

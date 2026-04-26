@@ -8,14 +8,13 @@ interface UpcomingGame {
   home_name: string; away_name: string
   home_color: string; away_color: string
   home_logo?: string; away_logo?: string
+  win_prob_home?: number
+  win_prob_away?: number
+  home_score?: number
+  away_score?: number
 }
 
 interface DayGroup { date: string; games: UpcomingGame[] }
-
-interface Pred {
-  win_prob_home: number; win_prob_away: number
-  home_score: number; away_score: number
-}
 
 function TeamBlock({ tri, name, color, logo, side }: { tri: string; name: string; color: string; logo?: string; side: 'home' | 'away' }) {
   const right = side === 'away'
@@ -33,11 +32,11 @@ function TeamBlock({ tri, name, color, logo, side }: { tri: string; name: string
 function GameRow({ g }: { g: UpcomingGame }) {
   const nav = useNavigate()
   const id = `${g.home_tri}-vs-${g.away_tri}`
-  const { data: pred } = useApi<Pred>(`/predict/game?home=${g.home_tri}&away=${g.away_tri}`)
+  const hasPred = typeof g.win_prob_home === 'number' && typeof g.win_prob_away === 'number' && typeof g.home_score === 'number' && typeof g.away_score === 'number'
 
-  const homeWin = pred ? pred.win_prob_home >= pred.win_prob_away : null
+  const homeWin = hasPred ? g.win_prob_home! >= g.win_prob_away! : null
   const favColor = homeWin === null ? '#4f46e5' : homeWin ? g.home_color : g.away_color
-  const favPct   = pred ? Math.round((homeWin ? pred.win_prob_home : pred.win_prob_away) * 100) : null
+  const favPct = hasPred ? Math.round((homeWin ? g.win_prob_home! : g.win_prob_away!) * 100) : null
 
   return (
     <div onClick={() => nav(`/game/${id}`)} style={{
@@ -63,20 +62,18 @@ function GameRow({ g }: { g: UpcomingGame }) {
       <TeamBlock tri={g.home_tri} name={g.home_name} color={g.home_color} logo={g.home_logo} side="home" />
 
       <div style={{ textAlign: 'center', minWidth: 160 }}>
-        {pred ? (
+        {hasPred ? (
           <>
             <div style={{ fontSize: 28, fontWeight: 900, letterSpacing: '-1.5px', color: '#0f172a', lineHeight: 1 }}>
-              <span style={{ color: g.home_color }}>{Math.round(pred.home_score)}</span>
+              <span style={{ color: g.home_color }}>{Math.round(g.home_score!)}</span>
               <span style={{ color: '#cbd5e1', margin: '0 8px' }}>–</span>
-              <span style={{ color: g.away_color }}>{Math.round(pred.away_score)}</span>
+              <span style={{ color: g.away_color }}>{Math.round(g.away_score!)}</span>
             </div>
             <div style={{ fontSize: 10, color: '#94a3b8', margin: '4px 0 6px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 }}>projected</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center' }}>
-              <div style={{ width: 72, height: 3, borderRadius: 2, overflow: 'hidden', background: '#e2e8f0' }}>
-                <div style={{
-                  height: '100%', width: `${Math.round(pred.win_prob_home * 100)}%`,
-                  background: `linear-gradient(90deg, ${g.home_color}, ${g.away_color})`,
-                }} />
+              <div style={{ width: 76, height: 4, borderRadius: 3, overflow: 'hidden', background: '#e2e8f0', display: 'flex' }}>
+                <div style={{ height: '100%', width: `${Math.round(g.win_prob_home! * 100)}%`, background: g.home_color }} />
+                <div style={{ height: '100%', width: `${Math.round(g.win_prob_away! * 100)}%`, background: g.away_color }} />
               </div>
             </div>
             <div style={{ fontSize: 12, fontWeight: 700, color: favColor, marginTop: 4 }}>

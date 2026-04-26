@@ -91,11 +91,52 @@ def _norm_name(name: str) -> str:
 def _to_py(v):
     if v is None:
         return None
-    if isinstance(v, float) and math.isnan(v):
-        return None
     if hasattr(v, "item"):
         return v.item()
+    if isinstance(v, (float, np.floating)) and math.isnan(float(v)):
+        return None
     return v
+
+
+def _safe_int(v, default: int = -1) -> int:
+    """Convert mixed numeric/string values to int without raising."""
+    try:
+        if v is None:
+            return default
+        if isinstance(v, float) and math.isnan(v):
+            return default
+        if hasattr(v, "item"):
+            v = v.item()
+        return int(v)
+    except Exception:
+        return default
+
+
+def _safe_float(v, default: float = 0.0) -> float:
+    """Convert mixed numeric values to finite float without raising."""
+    try:
+        if v is None:
+            return default
+        if hasattr(v, "item"):
+            v = v.item()
+        f = float(v)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except Exception:
+        return default
+
+
+def _opp_matchup_multiplier(opp_def_rating: float | None) -> float:
+    """
+    Convert opponent defensive rating into a bounded multiplier.
+    Better defenses (< league avg) reduce outputs, worse defenses increase outputs.
+    """
+    if opp_def_rating is None:
+        return 1.0
+    # Scale around league average and cap impact so projections remain stable.
+    rel = (opp_def_rating - _LEAGUE_AVG_RTG) / 10.0
+    return max(0.92, min(1.08, 1.0 + rel * 0.20))
 
 
 def _df_records(df: pd.DataFrame) -> list[dict]:
@@ -125,12 +166,28 @@ def _load():
 
     # Build name→position lookup (normalized, diacritic-free keys)
     pos_lookup: dict[str, str] = {}
+    live_roster_names_by_team: dict[str, set[str]] = {}
+    live_roster_rows_by_team: dict[str, list[dict]] = {}
+    recent_trades: list[dict] = []
     try:
-        from src.live_data import fetch_roster_positions
-        roster_df = fetch_roster_positions()
+        from src.live_data import fetch_current_rosters, fetch_recent_trades
+        roster_df = fetch_current_rosters()
         if not roster_df.empty:
             for _, r in roster_df.iterrows():
                 pos_lookup[_norm_name(r["player_name"])] = r.get("primary_pos", "F")
+                tri = str(r.get("team_tri", "")).upper()
+                if tri:
+                    norm_name = _norm_name(r.get("player_name", ""))
+                    live_roster_names_by_team.setdefault(tri, set()).add(norm_name)
+                    live_roster_rows_by_team.setdefault(tri, []).append({
+                        "player_name": str(r.get("player_name", "")),
+                        "norm_name": norm_name,
+                        "position": str(r.get("primary_pos", "F")),
+                        "source": str(r.get("source", "espn_roster")),
+                    })
+        trades_df = fetch_recent_trades()
+        if not trades_df.empty:
+            recent_trades = _df_records(trades_df)
     except Exception:
         pass
 
@@ -139,6 +196,9 @@ def _load():
         player_models=player_models, player_fc=player_fc,
         win_bundle=win_bundle, score_bundle=score_bundle,
         pos_lookup=pos_lookup,
+        live_roster_names_by_team=live_roster_names_by_team,
+        live_roster_rows_by_team=live_roster_rows_by_team,
+        recent_trades=recent_trades,
     )
 
 
@@ -156,6 +216,33 @@ def health():
 def teams_list():
     return [{"tri": t, "name": n, "color": TEAM_COLORS.get(t, "#6366f1"), "logo": TEAM_LOGOS.get(t, "")}
             for t, n in sorted(TEAM_NAMES.items(), key=lambda x: x[1])]
+
+
+@app.get("/rosters")
+def rosters(team: Optional[str] = None):
+    rows_by_team = _cache.get("live_roster_rows_by_team", {})
+    if not rows_by_team:
+        return {"rosters": []}
+
+    team_filter = team.upper() if team else None
+    out = []
+    for tri, rows in sorted(rows_by_team.items()):
+        if team_filter and tri != team_filter:
+            continue
+        players = sorted(rows, key=lambda p: p.get("player_name", ""))
+        out.append({
+            "team_tri": tri,
+            "team_name": TEAM_NAMES.get(tri, tri),
+            "team_color": TEAM_COLORS.get(tri, "#6366f1"),
+            "team_logo": TEAM_LOGOS.get(tri, ""),
+            "players": players,
+        })
+    return {"rosters": out}
+
+
+@app.get("/trades/recent")
+def trades_recent():
+    return {"trades": _cache.get("recent_trades", [])}
 
 
 # ── Player predictions ────────────────────────────────────────────────────────
@@ -178,6 +265,14 @@ def predict_players(
     active = feats[(feats["teamTricode"] == team) & (feats["season"] == cur_season)].copy()
     if active.empty:
         return {"team": team, "players": [], "context": {}}
+
+    # Keep only players currently mapped to the team from live roster + trades.
+    live_names = _cache.get("live_roster_names_by_team", {}).get(team, set())
+    if live_names:
+        active["_norm_player"] = active["playerName"].map(_norm_name)
+        active = active[active["_norm_player"].isin(live_names)].copy()
+        if active.empty:
+            return {"team": team, "players": [], "context": {}}
 
     # Latest row per player — sort by blend of recent + season avg to avoid
     # "hot streak" players (high EWMA from a few games, low season avg) displacing
@@ -235,20 +330,20 @@ def predict_players(
             if t.isdigit():
                 out_ids.add(int(t))
             else:
-                out_frags.append(t.lower())
+                out_frags.append(_norm_name(t))
 
         all_pool = active.sort_values("game_date").groupby("personId").last().reset_index()
 
         def _is_out(row) -> bool:
-            if int(row.get("personId", -1)) in out_ids:
+            if _safe_int(row.get("personId", -1), -1) in out_ids:
                 return True
-            nm = str(row.get("playerName", "")).lower()
+            nm = _norm_name(row.get("playerName", ""))
             return any(f in nm for f in out_frags)
 
         for _, r in all_pool.iterrows():
             if _is_out(r):
-                usage_boost += float(r.get("usg_pct_ewma", 0) or 0)
-                min_boost   += float(r.get("min_ewma", 0) or 0)
+                usage_boost += _safe_float(r.get("usg_pct_ewma", 0), 0.0)
+                min_boost   += _safe_float(r.get("min_ewma", 0), 0.0)
 
         out_mask = latest.apply(_is_out, axis=1)
         latest = latest[~out_mask].copy()
@@ -266,6 +361,9 @@ def predict_players(
     # Home/away multiplier applied to the EWMA/szn baseline
     # Home teams score ~2-3% more counting stats; away teams slightly less
     ha_mult = 1.02 if is_home is True else (0.98 if is_home is False else 1.0)
+
+    opp_def_rating = _safe_float(opp_ctx.get("opp_def_rating"), _LEAGUE_AVG_RTG) if opp_ctx else None
+    matchup_mult = _opp_matchup_multiplier(opp_def_rating)
 
     # Predict
     results = []
@@ -288,8 +386,8 @@ def predict_players(
         X = pd.DataFrame([row_d])[fc].fillna(0)
         preds: dict = {}
         for target in ["pts", "reb", "ast", "stl", "blk", "tov", "min"]:
-            ewma    = float(row.get(f"{target}_ewma")       or 0)
-            szn_val = float(row.get(f"{target}_season_avg") or 0)
+            ewma = _safe_float(row.get(f"{target}_ewma"), 0.0)
+            szn_val = _safe_float(row.get(f"{target}_season_avg"), 0.0)
             if target == "min" and min_boost > 0:
                 n = max(1, len(latest))
                 ewma = min(44.0, ewma + min_boost / n)
@@ -307,8 +405,16 @@ def predict_players(
             else:
                 preds[target] = round(max(0.0, baseline), 1)
 
+        # Apply stronger matchup context so optimizer reacts by opponent.
+        # Keep minutes unchanged; nudge turnovers opposite direction.
+        if opp_ctx:
+            for stat in ["pts", "reb", "ast", "stl", "blk"]:
+                preds[stat] = round(max(0.0, preds[stat] * matchup_mult), 1)
+            tov_mult = max(0.92, min(1.08, 2.0 - matchup_mult))
+            preds["tov"] = round(max(0.0, preds["tov"] * tov_mult), 1)
+
         szn_avg = {
-            stat: round(float(row.get(f"{stat}_season_avg") or 0), 1)
+            stat: round(_safe_float(row.get(f"{stat}_season_avg"), 0.0), 1)
             for stat in ["pts", "reb", "ast", "stl", "blk", "tov", "min"]
         }
 
@@ -316,13 +422,16 @@ def predict_players(
         position = _cache.get("pos_lookup", {}).get(_norm_name(name), "F")
 
         results.append({
-            "personId":    int(row["personId"]),
+            "personId":    _safe_int(row.get("personId"), -1),
             "name":        name,
             "team":        team,
             "position":    position,
             "predictions": preds,
             "season_avg":  szn_avg,
         })
+
+    # Drop rows without a valid personId so UI keys remain stable.
+    results = [p for p in results if p["personId"] >= 0]
 
     # ── Assign roles before normalization ────────────────────────────────────
     # Top 5 by predicted minutes = starters, rest = bench
@@ -385,6 +494,12 @@ def _team_profile(tri: str, out_names: set[str] | None = None) -> dict:
     tf = feats[(feats["teamTricode"] == tri) & (feats["season"] == cur_season)]
     if tf.empty:
         return {}
+
+    live_names = _cache.get("live_roster_names_by_team", {}).get(tri, set())
+    if live_names:
+        tf = tf[tf["playerName"].map(_norm_name).isin(live_names)]
+        if tf.empty:
+            return {}
 
     latest = tf.sort_values("game_date").groupby("personId").last().reset_index()
 
@@ -595,10 +710,25 @@ def schedule_today():
 def schedule_upcoming():
     try:
         from src.live_data import fetch_schedule_range
-        from collections import defaultdict
+        from src.live_data import fetch_injury_report
         df = fetch_schedule_range(days_ahead=7)
         if df.empty:
             return {"days": []}
+
+        injury_out_by_team: dict[str, set[str]] = defaultdict(set)
+        try:
+            inj = fetch_injury_report()
+            if not inj.empty:
+                for r in _df_records(inj):
+                    if int(r.get("status_rank") or 0) < 4:
+                        continue
+                    tri = str(r.get("team_tri") or "").upper()
+                    name = str(r.get("player_name") or "").lower().strip()
+                    if tri and name:
+                        injury_out_by_team[tri].add(name)
+        except Exception:
+            pass
+
         today_str = _date.today().isoformat()
         grouped: dict = defaultdict(list)
         for r in _df_records(df):
@@ -606,6 +736,33 @@ def schedule_upcoming():
             if d == today_str:
                 continue
             ht, at = r.get("home_tri", ""), r.get("away_tri", "")
+            win_prob = 0.5
+            home_score = _LEAGUE_AVG_PTS
+            away_score = _LEAGUE_AVG_PTS
+            try:
+                h = _team_profile(ht, injury_out_by_team.get(ht, set()))
+                a = _team_profile(at, injury_out_by_team.get(at, set()))
+                if h and a:
+                    h_pts_data = _LEAGUE_AVG_PTS * (h["ortg"] / _LEAGUE_AVG_RTG) * (a["drtg"] / _LEAGUE_AVG_RTG)
+                    a_pts_data = _LEAGUE_AVG_PTS * (a["ortg"] / _LEAGUE_AVG_RTG) * (h["drtg"] / _LEAGUE_AVG_RTG)
+                    h_pts_data += _HOME_COURT_PTS
+                    a_pts_data -= _HOME_COURT_PTS
+                    h_pts_data -= h["pts_lost"] * 0.60
+                    a_pts_data -= a["pts_lost"] * 0.60
+
+                    win_prob_model, h_pts_model, a_pts_model = _model_game_pred(h, a)
+                    home_score = round(0.80 * h_pts_data + 0.20 * h_pts_model, 1)
+                    away_score = round(0.80 * a_pts_data + 0.20 * a_pts_model, 1)
+
+                    score_diff = home_score - away_score
+                    elo_diff = h["elo"] - a["elo"]
+                    logit = 0.11 * score_diff + 0.0015 * elo_diff
+                    win_prob_data = _sigmoid(logit)
+                    win_prob = round(0.75 * win_prob_data + 0.25 * win_prob_model, 4)
+                    win_prob = max(0.05, min(0.95, win_prob))
+            except Exception:
+                pass
+
             grouped[d].append({
                 "game_id":    r.get("game_id", ""),
                 "home_tri":   ht, "away_tri": at,
@@ -615,6 +772,10 @@ def schedule_upcoming():
                 "away_color": TEAM_COLORS.get(at, "#8b5cf6"),
                 "home_logo":  TEAM_LOGOS.get(ht, ""),
                 "away_logo":  TEAM_LOGOS.get(at, ""),
+                "win_prob_home": win_prob,
+                "win_prob_away": round(1 - win_prob, 4),
+                "home_score": home_score,
+                "away_score": away_score,
             })
         return {"days": [{"date": d, "games": g} for d, g in sorted(grouped.items())]}
     except Exception as e:
@@ -673,3 +834,104 @@ def live_scores():
         return {"games": games}
     except Exception as e:
         return {"games": [], "error": str(e)}
+
+
+@app.get("/boxscore/final")
+def final_boxscore_compare(home: str, away: str):
+    """
+    Return predicted-vs-actual player box score for completed games.
+    """
+    try:
+        from src.live_data import fetch_live_scores, fetch_live_boxscore
+
+        home = home.upper()
+        away = away.upper()
+
+        live_df = fetch_live_scores()
+        if live_df.empty:
+            return {"is_final": False, "home": home, "away": away, "players": {}}
+
+        target = live_df[
+            (live_df["home_tri"] == home) &
+            (live_df["away_tri"] == away) &
+            (live_df["status"] == 3)
+        ]
+        if target.empty:
+            return {"is_final": False, "home": home, "away": away, "players": {}}
+
+        game_id = str(target.iloc[-1].get("game_id", ""))
+        home_score_actual = _safe_int(target.iloc[-1].get("home_score"), 0)
+        away_score_actual = _safe_int(target.iloc[-1].get("away_score"), 0)
+
+        home_box, away_box = fetch_live_boxscore(game_id)
+        if home_box.empty and away_box.empty:
+            return {"is_final": False, "home": home, "away": away, "players": {}}
+
+        pred_game = predict_game(home, away)
+        home_preds = predict_players(team=home, top_n=15, opp=away, is_home=True).get("players", [])
+        away_preds = predict_players(team=away, top_n=15, opp=home, is_home=False).get("players", [])
+
+        def _index_preds(players: list[dict]) -> dict[str, dict]:
+            idx: dict[str, dict] = {}
+            for p in players:
+                idx[_norm_name(p.get("name", ""))] = p
+            return idx
+
+        home_idx = _index_preds(home_preds)
+        away_idx = _index_preds(away_preds)
+
+        def _rows(df: pd.DataFrame, pred_idx: dict[str, dict]) -> list[dict]:
+            rows = []
+            for r in _df_records(df):
+                name = str(r.get("name", ""))
+                pred = pred_idx.get(_norm_name(name), {})
+                pstats = pred.get("predictions", {}) if isinstance(pred, dict) else {}
+                row = {
+                    "name": name,
+                    "position": r.get("position", ""),
+                    "actual": {
+                        "pts": _safe_float(r.get("pts"), 0.0),
+                        "reb": _safe_float(r.get("reb"), 0.0),
+                        "ast": _safe_float(r.get("ast"), 0.0),
+                        "stl": _safe_float(r.get("stl"), 0.0),
+                        "blk": _safe_float(r.get("blk"), 0.0),
+                        "tov": _safe_float(r.get("tov"), 0.0),
+                        "min": _safe_float(r.get("min"), 0.0),
+                    },
+                    "predicted": {
+                        "pts": _safe_float(pstats.get("pts"), 0.0),
+                        "reb": _safe_float(pstats.get("reb"), 0.0),
+                        "ast": _safe_float(pstats.get("ast"), 0.0),
+                        "stl": _safe_float(pstats.get("stl"), 0.0),
+                        "blk": _safe_float(pstats.get("blk"), 0.0),
+                        "tov": _safe_float(pstats.get("tov"), 0.0),
+                        "min": _safe_float(pstats.get("min"), 0.0),
+                    },
+                    "starter": bool(r.get("starter", False)),
+                    "matched_prediction": bool(pred),
+                }
+                row["diff"] = {
+                    k: round(row["actual"][k] - row["predicted"][k], 1)
+                    for k in ["pts", "reb", "ast", "stl", "blk", "tov", "min"]
+                }
+                rows.append(row)
+            rows.sort(key=lambda x: x["actual"]["min"], reverse=True)
+            return rows
+
+        return {
+            "is_final": True,
+            "home": home,
+            "away": away,
+            "game_id": game_id,
+            "score_actual": {"home": home_score_actual, "away": away_score_actual},
+            "score_predicted": {
+                "home": _safe_float(pred_game.get("home_score"), 0.0) if isinstance(pred_game, dict) else 0.0,
+                "away": _safe_float(pred_game.get("away_score"), 0.0) if isinstance(pred_game, dict) else 0.0,
+            },
+            "players": {
+                "home": _rows(home_box, home_idx),
+                "away": _rows(away_box, away_idx),
+            },
+        }
+    except Exception as e:
+        return {"is_final": False, "error": str(e), "players": {}}

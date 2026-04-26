@@ -308,6 +308,114 @@ def fetch_roster_positions(force: bool = False) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def fetch_recent_trades(force: bool = False, days_back: int = 120) -> pd.DataFrame:
+    """
+    Fetch recent NBA transactions and keep trade-related records.
+    Returns rows with at least player_name and to_team_tri when available.
+    """
+    cached = _load_cache("recent_trades")
+    if cached and not force:
+        return pd.DataFrame(cached)
+
+    try:
+        from datetime import datetime
+        from nba_api.stats.endpoints import playertransactions
+
+        end_dt = date.today()
+        start_dt = end_dt - timedelta(days=max(7, int(days_back)))
+        raw = playertransactions.PlayerTransactions(
+            start_date_nullable=start_dt.strftime("%m/%d/%Y"),
+            end_date_nullable=end_dt.strftime("%m/%d/%Y"),
+        ).get_data_frames()[0]
+    except Exception as e:
+        print(f"  [live] transactions fetch failed: {e}")
+        return pd.DataFrame()
+
+    if raw.empty:
+        _save_cache("recent_trades", [])
+        return raw
+
+    # Normalize column names for resilient lookup across nba_api versions.
+    colmap = {c.lower(): c for c in raw.columns}
+
+    def _col(*names):
+        for n in names:
+            c = colmap.get(n.lower())
+            if c:
+                return c
+        return None
+
+    player_col = _col("player_name", "player")
+    type_col = _col("transaction_type", "transaction")
+    desc_col = _col("description", "notes")
+    to_team_col = _col("to_team_abbreviation", "to_team", "team_abbreviation")
+    date_col = _col("transaction_date", "date")
+
+    if not player_col:
+        return pd.DataFrame()
+
+    rows = []
+    for _, r in raw.iterrows():
+        trans_type = str(r.get(type_col, "") if type_col else "").strip()
+        desc = str(r.get(desc_col, "") if desc_col else "").strip()
+        blob = f"{trans_type} {desc}".lower()
+        if "trade" not in blob:
+            continue
+
+        to_team_raw = str(r.get(to_team_col, "") if to_team_col else "").strip().upper()
+        to_team_tri = _norm_tri(to_team_raw) if to_team_raw else ""
+        if not to_team_tri:
+            # If destination team is missing, skip to avoid bad remaps.
+            continue
+
+        rows.append({
+            "player_name": str(r.get(player_col, "")).strip(),
+            "to_team_tri": to_team_tri,
+            "transaction_type": trans_type or "Trade",
+            "description": desc,
+            "transaction_date": str(r.get(date_col, "") if date_col else ""),
+        })
+
+    _save_cache("recent_trades", rows)
+    return pd.DataFrame(rows)
+
+
+def fetch_current_rosters(force: bool = False) -> pd.DataFrame:
+    """
+    Build current rosters from ESPN team rosters and apply recent trades.
+    """
+    cached = _load_cache("current_rosters")
+    if cached and not force:
+        return pd.DataFrame(cached)
+
+    base = fetch_roster_positions(force=force)
+    if base.empty:
+        return pd.DataFrame()
+
+    roster = base.copy()
+    roster["player_name"] = roster["player_name"].astype(str).str.strip()
+    roster["team_tri"] = roster["team_tri"].astype(str).str.upper().map(_norm_tri)
+    roster["source"] = "espn_roster"
+
+    trades = fetch_recent_trades(force=force)
+    if not trades.empty:
+        # Latest trade destination wins for each player.
+        trades = trades.copy()
+        trades["player_name"] = trades["player_name"].astype(str).str.strip()
+        trades["to_team_tri"] = trades["to_team_tri"].astype(str).str.upper().map(_norm_tri)
+        if "transaction_date" in trades.columns:
+            trades = trades.sort_values("transaction_date")
+        latest = trades.dropna(subset=["player_name", "to_team_tri"]).drop_duplicates("player_name", keep="last")
+        move_map = dict(zip(latest["player_name"], latest["to_team_tri"]))
+        roster["team_tri"] = roster["player_name"].map(lambda n: move_map.get(n, None)).fillna(roster["team_tri"])
+        traded_names = set(move_map.keys())
+        roster["source"] = roster["player_name"].map(lambda n: "trade_adjusted" if n in traded_names else "espn_roster")
+
+    records = roster.to_dict("records")
+    _save_cache("current_rosters", records)
+    return roster
+
+
 # -- upcoming schedule --
 
 def fetch_schedule_range(days_ahead: int = 7) -> pd.DataFrame:

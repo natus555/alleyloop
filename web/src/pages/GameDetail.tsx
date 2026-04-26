@@ -35,6 +35,23 @@ interface TeamPreds {
   context: { opp: string; opp_def_rating: number | null; min_redistributed: number; injured_out: string | null }
 }
 
+interface PlayerCompareRow {
+  name: string
+  position: string
+  actual: Record<string, number>
+  predicted: Record<string, number>
+  diff: Record<string, number>
+  starter: boolean
+  matched_prediction: boolean
+}
+
+interface FinalCompare {
+  is_final: boolean
+  score_actual: { home: number; away: number }
+  score_predicted: { home: number; away: number }
+  players: { home: PlayerCompareRow[]; away: PlayerCompareRow[] }
+}
+
 const STATS = ['pts','reb','ast','stl','blk','tov','min']
 
 const POS_COLORS: Record<string, { bg: string; text: string }> = {
@@ -125,7 +142,7 @@ function PlayerCard({ p, injured }: { p: PlayerPred; injured: boolean }) {
 
 function WinProbBar({ pred }: { pred: GamePred }) {
   const homeW = Math.round(pred.win_prob_home * 100)
-  const awayW = 100 - homeW
+  const awayW = Math.round(pred.win_prob_away * 100)
   return (
     <div style={{
       background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: 16,
@@ -164,7 +181,10 @@ function WinProbBar({ pred }: { pred: GamePred }) {
           <span style={{ fontSize: 10, color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>win probability</span>
           <span style={{ color: pred.away_color }}>{awayW}%</span>
         </div>
-        <div style={{ height: 10, borderRadius: 6, background: `linear-gradient(90deg, ${pred.home_color} ${homeW}%, ${pred.away_color} ${homeW}%)`, boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)' }} />
+        <div style={{ height: 10, borderRadius: 6, boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden', display: 'flex', background: '#e2e8f0' }}>
+          <div style={{ width: `${homeW}%`, background: pred.home_color }} />
+          <div style={{ width: `${awayW}%`, background: pred.away_color }} />
+        </div>
       </div>
 
       <div style={{ display: 'flex', gap: 16, justifyContent: 'center', marginTop: 12 }}>
@@ -173,6 +193,16 @@ function WinProbBar({ pred }: { pred: GamePred }) {
       </div>
     </div>
   )
+}
+
+function errorTone(absErr: number) {
+  if (absErr <= 2) {
+    return { bg: '#dcfce7', text: '#166534' }
+  }
+  if (absErr <= 5) {
+    return { bg: '#fef3c7', text: '#92400e' }
+  }
+  return { bg: '#fee2e2', text: '#b91c1c' }
 }
 
 export default function GameDetail() {
@@ -185,6 +215,7 @@ export default function GameDetail() {
   const [awayInj, setAwayInj] = useState<InjuryRow[]>([])
   const [homePreds, setHomePreds] = useState<TeamPreds | null>(null)
   const [awayPreds, setAwayPreds] = useState<TeamPreds | null>(null)
+  const [finalCmp, setFinalCmp] = useState<FinalCompare | null>(null)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -213,6 +244,14 @@ export default function GameDetail() {
         ])
         setHomePreds(hp)
         setAwayPreds(ap)
+
+        try {
+          const cmp = await apiFetch<FinalCompare>(`/boxscore/final?home=${home}&away=${away}`)
+          if (cmp?.is_final) setFinalCmp(cmp)
+          else setFinalCmp(null)
+        } catch {
+          setFinalCmp(null)
+        }
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : String(e))
       } finally {
@@ -263,17 +302,124 @@ export default function GameDetail() {
     )
   }
 
+  const teamMae = (rows: PlayerCompareRow[]) => {
+    const valid = rows.filter(r => r.matched_prediction)
+    if (!valid.length) return { pts: 0, reb: 0, ast: 0, min: 0 }
+
+    const mae = (k: 'pts' | 'reb' | 'ast' | 'min') =>
+      valid.reduce((s, r) => s + Math.abs((r.actual[k] ?? 0) - (r.predicted[k] ?? 0)), 0) / valid.length
+
+    return { pts: mae('pts'), reb: mae('reb'), ast: mae('ast'), min: mae('min') }
+  }
+
+  const homeMae = finalCmp ? teamMae(finalCmp.players.home) : null
+  const awayMae = finalCmp ? teamMae(finalCmp.players.away) : null
+
+  const renderFinalTable = (rows: PlayerCompareRow[]) => (
+    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+      <thead>
+        <tr style={{ background: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
+          {['Player', 'PTS', 'REB', 'AST', 'MIN'].map(h => (
+            <th key={h} style={{ padding: '9px 10px', textAlign: h === 'Player' ? 'left' : 'right', fontSize: 10, color: '#94a3b8', fontWeight: 700, letterSpacing: '0.05em' }}>{h}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.slice(0, 10).map((r, i) => (
+          <tr key={`${r.name}-${i}`} style={{ borderBottom: '1px solid #f8fafc' }}>
+            <td style={{ padding: '8px 10px', fontSize: 12, color: '#0f172a', fontWeight: 600 }}>
+              {r.name}
+            </td>
+            <td style={{ padding: '8px 10px', textAlign: 'right', fontSize: 11 }}>
+              <span style={{ color: '#0f172a', fontWeight: 700 }}>{r.actual.pts.toFixed(1)}</span>
+              <span style={{ color: '#94a3b8' }}> / {r.predicted.pts.toFixed(1)}</span>
+              <span style={{
+                marginLeft: 6, fontSize: 10, fontWeight: 700, borderRadius: 999, padding: '1px 6px',
+                ...errorTone(Math.abs(r.diff.pts)),
+              }}>
+                {r.diff.pts > 0 ? '+' : ''}{r.diff.pts.toFixed(1)}
+              </span>
+            </td>
+            <td style={{ padding: '8px 10px', textAlign: 'right', fontSize: 11 }}>
+              <span style={{ color: '#0f172a', fontWeight: 700 }}>{r.actual.reb.toFixed(1)}</span>
+              <span style={{ color: '#94a3b8' }}> / {r.predicted.reb.toFixed(1)}</span>
+              <span style={{
+                marginLeft: 6, fontSize: 10, fontWeight: 700, borderRadius: 999, padding: '1px 6px',
+                ...errorTone(Math.abs(r.diff.reb)),
+              }}>
+                {r.diff.reb > 0 ? '+' : ''}{r.diff.reb.toFixed(1)}
+              </span>
+            </td>
+            <td style={{ padding: '8px 10px', textAlign: 'right', fontSize: 11 }}>
+              <span style={{ color: '#0f172a', fontWeight: 700 }}>{r.actual.ast.toFixed(1)}</span>
+              <span style={{ color: '#94a3b8' }}> / {r.predicted.ast.toFixed(1)}</span>
+              <span style={{
+                marginLeft: 6, fontSize: 10, fontWeight: 700, borderRadius: 999, padding: '1px 6px',
+                ...errorTone(Math.abs(r.diff.ast)),
+              }}>
+                {r.diff.ast > 0 ? '+' : ''}{r.diff.ast.toFixed(1)}
+              </span>
+            </td>
+            <td style={{ padding: '8px 10px', textAlign: 'right', fontSize: 11 }}>
+              <span style={{ color: '#0f172a', fontWeight: 700 }}>{r.actual.min.toFixed(1)}</span>
+              <span style={{ color: '#94a3b8' }}> / {r.predicted.min.toFixed(1)}</span>
+              <span style={{
+                marginLeft: 6, fontSize: 10, fontWeight: 700, borderRadius: 999, padding: '1px 6px',
+                ...errorTone(Math.abs(r.diff.min)),
+              }}>
+                {r.diff.min > 0 ? '+' : ''}{r.diff.min.toFixed(1)}
+              </span>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+
   return (
     <div className="fade-in">
-      <button onClick={() => nav(-1)} style={{
-        display: 'flex', alignItems: 'center', gap: 6, marginBottom: 20,
-        background: 'none', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: 13, fontWeight: 600,
-        padding: '6px 0',
-      }}>
+      <button
+        onClick={() => nav(-1)}
+        className="mb-5 flex items-center gap-1.5 rounded-md px-1 py-1 text-[13px] font-semibold text-slate-500 transition hover:bg-white/60 hover:text-slate-700"
+      >
         <ArrowLeft size={14} /> Back
       </button>
 
       {pred && <WinProbBar pred={pred} />}
+
+      {finalCmp && (
+        <div className="mb-4 rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
+          <div style={{ fontSize: 11, fontWeight: 800, color: '#4f46e5', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
+            Final Box Score · Predicted vs Real
+          </div>
+          <div style={{ display: 'flex', gap: 16, fontSize: 12, color: '#64748b', marginBottom: 10 }}>
+            <span>Actual: <strong style={{ color: '#0f172a' }}>{finalCmp.score_actual.home} - {finalCmp.score_actual.away}</strong></span>
+            <span>Predicted: <strong style={{ color: '#0f172a' }}>{Math.round(finalCmp.score_predicted.home)} - {Math.round(finalCmp.score_predicted.away)}</strong></span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+            <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 10px', background: '#f8fafc' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>Home MAE</div>
+              <div style={{ fontSize: 11, color: '#334155' }}>
+                PTS {homeMae?.pts.toFixed(1)} · REB {homeMae?.reb.toFixed(1)} · AST {homeMae?.ast.toFixed(1)} · MIN {homeMae?.min.toFixed(1)}
+              </div>
+            </div>
+            <div style={{ border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 10px', background: '#f8fafc' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>Away MAE</div>
+              <div style={{ fontSize: 11, color: '#334155' }}>
+                PTS {awayMae?.pts.toFixed(1)} · REB {awayMae?.reb.toFixed(1)} · AST {awayMae?.ast.toFixed(1)} · MIN {awayMae?.min.toFixed(1)}
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div style={{ border: '1px solid #f1f5f9', borderRadius: 8, overflow: 'hidden' }}>
+              {renderFinalTable(finalCmp.players.home)}
+            </div>
+            <div style={{ border: '1px solid #f1f5f9', borderRadius: 8, overflow: 'hidden' }}>
+              {renderFinalTable(finalCmp.players.away)}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
         {/* Home */}
